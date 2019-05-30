@@ -10,7 +10,6 @@ const {
   SelectOption
 } = require("@dlghq/dialog-bot-sdk");
 const { flatMap } = require("rxjs/operators");
-const axios = require("axios");
 const { merge } = require("rxjs");
 const moment = require("moment");
 var _ = require("lodash");
@@ -33,7 +32,7 @@ const selectOptionsTime = [
 var mentions = [];
 var addedToGroups = [];
 var groupsToTrack = [];
-const currentUser = { name: "", peer: "", nick: "" };
+const trackableUsers = [];
 var specifiedTime = { hour: null, min: null };
 var scheduledTime = "";
 
@@ -49,7 +48,7 @@ if (typeof token !== "string") {
 const endpoint =
   process.env.BOT_ENDPOINT || "https://grpc-test.transmit.im:9443";
 
-// async function run(token, endpoint) {
+
 const bot = new Bot.default({
   token,
   endpoints: [endpoint]
@@ -71,24 +70,18 @@ bot.updateSubject.subscribe({
 
 bot.ready.then(response => {
   //mapping the groups the bot has been added to
-  response.groups.forEach(group => {
-    const newGroup = { id: group.id, name: group.title };
-    addedToGroups.push(newGroup);
-  });
-
-  //mapping the current user
-  response.dialogs.forEach(peer => {
-    if (peer.type === "private") {
-      getCurrentUser(bot, peer);
-    }
-  });
+  response.groups
+    .forEach(group => {
+      const newGroup = { id: group.id, name: group.title };
+      addedToGroups.push(newGroup);
+    })
+    addBotToTrackableGroups();
 });
 
 //subscribing to incoming messages
 const messagesHandle = bot.subscribeToMessages().pipe(
   flatMap(async message => {
     const wordsArray = message.content.text.split(" ");
-    const user_current = "@" + currentUser.nick;
     const content = message.content;
     const peer = message.peer;
     //conditions to check for user mentions.
@@ -96,14 +89,20 @@ const messagesHandle = bot.subscribeToMessages().pipe(
       peer.type === "private" &&
       content.text === process.env.TRACK_MENTIONS
     ) {
-      await addBotToTrackableGroups();
+      const user = await getCurrentUser(bot , message.peer);
+      trackableUsers.push(user);
+      
     } else if (
-      _.includes(wordsArray, user_current) &&
       content.type === "text" &&
       peer.type === "group" &&
-      containsValue(groupsToTrack, peer.id) === true
+      containsValue(groupsToTrack, peer.id) === true 
     ) {
-      addMentions(message);
+      //checking if mentioned user is a part of users whose mentions are to be tracked.
+        wordsArray.map(word =>{   
+           if(_.find(trackableUsers , ['nick', word])){             
+             addMentions(message);
+           }
+        });
     } else if (
       content.type === "text" &&
       peer.type === "private" &&
@@ -115,21 +114,20 @@ const messagesHandle = bot.subscribeToMessages().pipe(
       peer.type === "private" &&
       content.text === process.env.SCHEDULE_MENTIONS
     ) {
-      sendTextMessage("Choose Time", selectOptionsTime);
+      sendTextMessage("Choose Time", message.peer, selectOptionsTime);
     } else if (
       content.type === "text" &&
       peer.type === "private" &&
       content.text === process.env.LIST_MENTIONS
-    ) {
-      if (mentions.length !== 0) listMentions(bot);
-      else if (mentions.length === 0 && groupsToTrack.length === 0) {
+    ) {      
+      const user = _.find(trackableUsers , [`peer['id']` , message.peer.id ]);
+      if (user) listMentions(bot , user);
+      else if (!user) {
         message.text =
-          'Mentions tracking is turned off, To turn it on type "start tracking" without the qoutes ';
+        `Mentions tracking is turned off, To turn it on type "${process.env.TRACK_MENTIONS}" without the qoutes`;
         sendTextToBot(bot, message);
-      } else if (mentions.length === 0 && groupsToTrack.length !== 0) {
-        message.text = "There are no mentions";
-        sendTextToBot(bot, message);
-      }
+      } 
+      
     } else if (
       content.type === "text" &&
       peer.type === "private" &&
@@ -143,30 +141,27 @@ const messagesHandle = bot.subscribeToMessages().pipe(
 //creating action handle
 const actionsHandle = bot.subscribeToActions().pipe(
   flatMap(async event => {
-    console.log(event);
+    const user = _.find(trackableUsers , [`peer['id']` , event.uid ]);
+
     if (containsValue(groupsToTrack, Number(event.id)) === true) {
-      removeGroupFromTrackableGroups(event.id);
-    } else if (containsValue(groupsToTrack, Number(event.id)) === false && event.id!== "Hour" && event.id!== "Minutes") {
-      console.log("called");
-      addGroupToTrackableGroups(event.id);
+      removeGroupFromTrackableGroups(event.id , user);
+    } else if (
+      containsValue(groupsToTrack, Number(event.id)) === false &&
+      event.id !== "Hour" &&
+      event.id !== "Minutes"
+    ) {
+      addGroupToTrackableGroups(event.id , user);
     }
-
-    // if (event.id.toString() === "scheduleTime") {
-    //   scheduleMentionsAction(bot, event);
-    // }
-
 
 
     if (event.id === "Hour") {
       specifiedTime.hour = event.value;
-      console.log("specified" ,specifiedTime)
       if (specifiedTime.min !== null && specifiedTime.hour !== null)
-        scheduleCustomReminder(specifiedTime.hour, specifiedTime.min);
+        scheduleCustomReminder(specifiedTime.hour, specifiedTime.min , user);
     } else if (event.id === "Minutes") {
       specifiedTime.min = event.value;
-      console.log("specified" ,specifiedTime)
       if (specifiedTime.min !== null && specifiedTime.hour !== null)
-        scheduleCustomReminder(specifiedTime.hour, specifiedTime.min);
+        scheduleCustomReminder(specifiedTime.hour, specifiedTime.min , user );
     }
   })
 );
@@ -186,78 +181,56 @@ new Promise((resolve, reject) => {
 action handle functions
 
 ------ */
-function removeGroupFromTrackableGroups(value) {
+function removeGroupFromTrackableGroups(value , user) {
   groupIndexToRemove = _.findIndex(groupsToTrack, function(o) {
     return o.id === Number(value);
-    
   });
 
   const messageToBot = {
-    peer: currentUser.peer,
+    peer: user.peer,
     text: groupsToTrack[groupIndexToRemove].name + " tracking disabled"
-  }
-  sendTextToBot( bot , messageToBot);
+  };
+  sendTextToBot(bot, messageToBot);
 
   groupsToTrack.splice(groupIndexToRemove, 1);
   listBotGroupSubscriptions(bot, messageToBot);
 }
 
-function addGroupToTrackableGroups(value) {
+function addGroupToTrackableGroups(value , user) {
   groupToInsert = _.find(addedToGroups, function(o) {
     return o.id === Number(value);
   });
-  console.log("YOLO", groupToInsert);
   
-  
+
   const messageToBot = {
-    peer: currentUser.peer,
+    peer: user.peer,
     text: groupToInsert.name + " tracking enabled"
-  }
-  sendTextToBot( bot , messageToBot);
+  };
+  sendTextToBot(bot, messageToBot);
 
   groupsToTrack.push(groupToInsert);
   listBotGroupSubscriptions(bot, messageToBot);
 }
 
-function scheduleMentionsAction(bot, event) {
-  const schedule = event.value.toString();
-  scheduledTime = moment(schedule, "h:mm a").format("h:mm a");
-  const now = moment(Date.now()).format("h:mm a");
-  const timeLeft = moment(scheduledTime, "h:mm a").diff(moment(now, "h:mm a"));
 
-  setTimeout(function() {
-    listMentions(bot);
-  }, timeLeft);
-
-  messageToBot = {
-    text: "Your mentions have been scheduled",
-    peer: currentUser.peer
-  };
-
-  sendTextToBot(bot, messageToBot);
-}
-
-function scheduleCustomReminder(hour, min) {
+function scheduleCustomReminder(hour, min , user) {
   const time = hour + ":" + min;
   const scheduledTime = moment(time, "HH:mm").format("HH:mm");
   const now = moment(Date.now()).format("HH:mm");
   const timeLeft = moment(scheduledTime, "HH:mm").diff(moment(now, "HH:mm"));
-
+  
   if (timeLeft < 0) {
-    sendTextMessage("Selected time has passed, try again");
+    sendTextMessage("Selected time has passed, try again" , user.peer);
     specifiedTime.hour = null;
     specifiedTime.min = null;
   } else {
-    listMentions(bot);
-    console.log("DONE");
+    const successResponse = "Your mentions have been scheduled";
+    sendTextMessage(successResponse , user.peer);
+
     setTimeout(function() {
-      // sendTextMessage(mentions);
-      listMentions(bot)
+      listMentions(bot , user);
     }, timeLeft);
 
-    const successResponse = "Your mentions have been scheduled";
-
-    sendTextMessage(successResponse);
     specifiedTime.hour = null;
     specifiedTime.min = null;
   }
@@ -270,9 +243,8 @@ message handle functions
 ------ */
 async function getCurrentUser(bot, peer) {
   const user = await bot.getUser(peer.id);
-  currentUser.name = user.name;
-  currentUser.peer = peer;
-  currentUser.nick = user.nick;
+  const currentUser = new User( user.name , peer , user.nick );
+  return currentUser;
 }
 
 async function addBotToTrackableGroups() {
@@ -280,7 +252,6 @@ async function addBotToTrackableGroups() {
 }
 
 async function addMentions(message) {
-  console.log("reachedhere");
   const date = moment(message.date).format("MMMM Do YYYY, h:mm a");
   var group = "";
 
@@ -294,54 +265,59 @@ async function addMentions(message) {
     time: date
   };
   mentions.push(mention);
+
+
+  
 }
 
-// function scheduleMentions(bot, message) {
-//   var selectOptions = [];
-//   scheduleOptions.map(option => {
-//     selectOptions.push(new SelectOption(option.label, option.value));
-//   });
-//   const mid = bot.sendText(
-//     message.peer,
-//     "When do you want to schedule the mentions",
-//     MessageAttachment.reply(null),
-//     ActionGroup.create({
-//       actions: [
-//         Action.create({
-//           id: `scheduleTime`,
-//           widget: Select.create({
-//             label: "options",
-//             options: selectOptions
-//           })
-//         })
-//       ]
-//     })
-//   );
-// }
 
-function listMentions(bot) {
-  groups = [];
+function listMentions(bot , user) {
 
+  let new_mentions = []
   mentions.map(mention => {
-    if (!_.includes(groups, mention.group)) {
-      groups.push(mention.group);
-    }
+     const wordsArray = mention.text.split(' ');
+     
+       if(wordsArray.includes(user.nick)){
+            new_mentions.push(mention);
+       }
   });
 
-  groups.map(group => {
-    var mentionsInGroup = _.filter(mentions, { group: group });
-    var textToBot = `\n @${group} \n`;
-    mentionsInGroup.map(mention => {
-      textToBot += mention.time + ":" + mention.text + "\n";
-    });
+  if(new_mentions.length !== 0){
+      //send mentions to the user 
+      let groups = [];
+      new_mentions.map(mention => {
+        if (!_.includes(groups, mention.group)) {
+          groups.push(mention.group);
+        }
+      });
 
+      groups.map(group => {
+      var mentionsInGroup = _.filter(new_mentions, { group: group });
+      var textToBot = `\n @${group} \n`;
+      mentionsInGroup.map(mention => {
+          textToBot += mention.time + ":" + mention.text + "\n";
+      });
+
+      var messageToSend = {
+        peer: user.peer,
+        text: textToBot
+      };    
+
+      sendTextToBot(bot, messageToSend);
+      });
+
+  }else{
     var messageToSend = {
-      peer: currentUser.peer,
-      text: textToBot
-    };
+      peer: user.peer,
+      text: "You don't have any mentions"
+    };    
 
     sendTextToBot(bot, messageToSend);
-  });
+
+
+  }
+
+
 }
 
 function listBotGroupSubscriptions(bot, message) {
@@ -393,10 +369,8 @@ function containsValue(array, value) {
   return valuePresent;
 }
 
-
-function sendTextMessage(text, actions) {
-  console.log("actions", actions);
-  var messageToSend = messageformat(text);
+function sendTextMessage(text, peer,  actions) {
+  var messageToSend = messageformat(text , peer);
   var action = actions || null;
   var actionGroup = null;
   if (action !== null) {
@@ -404,17 +378,14 @@ function sendTextMessage(text, actions) {
       actions: actionFormat(action)
     });
   }
-  console.log("actions", actionGroup);
   sendTextToBot(bot, messageToSend, actionGroup);
 }
-
 
 function actionFormat(actionOptions) {
   var actions = [];
   actionOptions.map(options => {
     if (options.type === "select") {
       const selectOptions = selectOptionFormat(options.options);
-      console.log("Select", selectOptions);
       var action = Action.create({
         id: options.id,
         widget: Select.create({
@@ -437,7 +408,6 @@ function actionFormat(actionOptions) {
   return actions;
 }
 
-
 function selectOptionFormat(options) {
   var selectOptions = [];
   options.map(option => {
@@ -447,8 +417,14 @@ function selectOptionFormat(options) {
   return selectOptions;
 }
 
-
-function messageformat(text) {
-  var message = { peer: currentUser.peer, text: text };
+function messageformat(text , peer) {
+  var message = { peer: peer, text: text };
   return message;
+}
+
+function User(name, peer, nick) {
+  const nickname = `@${nick}`
+  this.name = name;
+  this.peer = peer;
+  this.nick = nickname;
 }

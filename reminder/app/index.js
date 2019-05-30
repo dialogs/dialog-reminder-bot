@@ -10,16 +10,14 @@ const {
   SelectOption
 } = require("@dlghq/dialog-bot-sdk");
 const { flatMap } = require("rxjs/operators");
-const axios = require("axios");
 const { merge } = require("rxjs");
 const moment = require("moment");
-var _ = require("lodash");
-var timeOptions = require("./timeOptions");
+let _ = require("lodash");
+let timeOptions = require("./timeOptions");
 
-var currentReminder = "";
-const currentUser = { name: "", peer: "" };
-var messageFormat = { text: "", peer: "" };
-var specifiedTime = { hour: null, min: null };
+let currentReminder = "";
+let activeUsers = [];
+let specifiedTime = { hour: null, min: null };
 
 dotenv.config();
 const buttonOptions = [
@@ -75,13 +73,14 @@ bot.updateSubject.subscribe({
   }
 });
 
-bot.ready.then(response => {
+bot.ready.then(async response => {
   //mapping the current user
-  response.dialogs.forEach(peer => {
+  await response.dialogs.forEach(peer => {
+    console.log("PEER1", peer);
     if (peer.type === "private") {
-      const text =
-        "Hi! You can send me a message and I will remind you about it at the right time.";
-      getCurrentUser(bot, peer).then(res => sendTextMessage(text));
+      getCurrentUser(bot, peer).then(async user => {
+        await sendFirstMessage(user.peer);
+      });
     }
   });
 });
@@ -98,35 +97,35 @@ const messagesHandle = bot.subscribeToMessages().pipe(
   flatMap(async message => {
     currentReminder = message.content.text;
     const text = "Ok! When do you need me to remind you of this?";
-    sendTextMessage(text, buttonOptions);
+    sendTextMessage(text, message.peer, buttonOptions);
   })
 );
 
 //creating action handle
 const actionsHandle = bot.subscribeToActions().pipe(
   flatMap(async event => {
+    let peer = new Peer(event.uid);
+    console.log("PEER", peer);
     if (event.id === "Hour") {
       specifiedTime.hour = event.value;
-      console.log("specified" ,specifiedTime)
       if (specifiedTime.min !== null && specifiedTime.hour !== null)
-        scheduleCustomReminder(specifiedTime.hour, specifiedTime.min);
+        scheduleCustomReminder(specifiedTime.hour, specifiedTime.min , peer);
     } else if (event.id === "Minutes") {
       specifiedTime.min = event.value;
-      console.log("specified" ,specifiedTime)
       if (specifiedTime.min !== null && specifiedTime.hour !== null)
-        scheduleCustomReminder(specifiedTime.hour, specifiedTime.min);
+        scheduleCustomReminder(specifiedTime.hour, specifiedTime.min, peer);
     } else if (event.id === "30 mins") {
-      scheduleReminder(30);
+      scheduleReminder(30, peer);
     } else if (event.id === "1 hour") {
-      scheduleReminder(60);
+      scheduleReminder(60, peer);
     } else if (event.id === "2 hours") {
-      scheduleReminder(120);
+      scheduleReminder(120, peer);
     } else if (event.id === "tomorrow") {
-      scheduleReminder(60 * 24);
+      scheduleReminder(60 * 24, peer);
     } else if (event.id === "1 week") {
-      scheduleReminder(60 * 24 * 7);
+      scheduleReminder(60 * 24 * 7, peer);
     } else if (event.id === "selectTime") {
-      sendTextMessage("Choose Time", selectOptionsTime);
+      sendTextMessage("Choose Time", peer, selectOptionsTime);
     }
   })
 );
@@ -146,38 +145,40 @@ new Promise((resolve, reject) => {
 action handle functions
 
 ------ */
-function scheduleReminder(time) {
+function scheduleReminder(time, peer) {
+  console.log("Schedule reminder got called", time , peer);
   const timeLeft = time * 60000; //milliseconds
   const reminderText =
     "Hey! you asked to remind " + '"' + currentReminder + '"';
   setTimeout(function() {
-    sendTextMessage(reminderText);
+    sendTextMessage(reminderText, peer);
   }, timeLeft);
-  const successResponse = "Your mentions have been scheduled";
+  const successResponse = "Your reminder has been scheduled";
 
-  sendTextMessage(successResponse);
+  sendTextMessage(successResponse, peer);
 }
 
-function scheduleCustomReminder(hour, min) {
+function scheduleCustomReminder(hour, min, peer) {
+  console.log("Schedule custom reminder got called", hour, min , peer);
   const time = hour + ":" + min;
   const scheduledTime = moment(time, "HH:mm").format("HH:mm");
   const now = moment(Date.now()).format("HH:mm");
   const timeLeft = moment(scheduledTime, "HH:mm").diff(moment(now, "HH:mm"));
 
   if (timeLeft < 0) {
-    sendTextMessage("Selected time has passed, try again");
+    sendTextMessage("Selected time has passed, try again", peer);
     specifiedTime.hour = null;
     specifiedTime.min = null;
   } else {
     const reminderText =
       "Hey! you asked to remind " + '"' + currentReminder + '"';
     setTimeout(function() {
-      sendTextMessage(reminderText);
+      sendTextMessage(reminderText, peer);
     }, timeLeft);
 
     const successResponse = "Your mentions have been scheduled";
 
-    sendTextMessage(successResponse);
+    sendTextMessage(successResponse, peer);
     specifiedTime.hour = null;
     specifiedTime.min = null;
   }
@@ -189,9 +190,11 @@ message handle functions
 
 ------ */
 async function getCurrentUser(bot, peer) {
-  const user = await bot.getUser(peer.id);
-  currentUser.name = user.name;
-  currentUser.peer = peer;
+  const current_user = await bot.getUser(peer.id);
+  let user = new User(current_user.name, peer);
+  activeUsers.push(user);
+  console.log("USER", user);
+  return user;
 }
 
 //general functions
@@ -234,8 +237,8 @@ function actionFormat(actionOptions) {
 }
 
 //actions is an array of format [{type:"" , id: "" , label: "" , options: ""}]
-function sendTextMessage(text, actions) {
-  var messageToSend = messageformat(text);
+function sendTextMessage(text, peer, actions) {
+  var messageToSend = messageformat(text, peer);
   var action = actions || null;
   var actionGroup = null;
   if (action !== null) {
@@ -246,8 +249,8 @@ function sendTextMessage(text, actions) {
   sendTextToBot(bot, messageToSend, actionGroup);
 }
 
-function messageformat(text) {
-  var message = { peer: currentUser.peer, text: text };
+function messageformat(text, peer) {
+  var message = { peer: peer, text: text };
   return message;
 }
 
@@ -262,4 +265,21 @@ function sendTextToBot(bot, message, actionGroup) {
     )
     .then(response => console.log(response))
     .catch(err => console.log("err", err));
+}
+
+function User(name, peer) {
+  this.name = name;
+  this.peer = peer;
+}
+
+function Peer(id) {
+  this.id = id;
+  this.type = "private";
+  this.strId = null;
+}
+
+function sendFirstMessage(peer) {
+  const text =
+    "Hi! You can send me a message and I will remind you about it at the right time.";
+  sendTextMessage(text, peer);
 }
