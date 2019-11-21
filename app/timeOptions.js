@@ -1,7 +1,7 @@
 const scheduleOptionsHr = [];
 const scheduleOptionsMin = [];
 
-var i, j;
+let i, j;
 for (i = 0; i < 24; i++) {
   scheduleOptionsHr.push(i.toString());
 }
@@ -10,9 +10,9 @@ for (j = 0; j < 60; j++) {
 }
 
 function optionFormat(options) {
-  var allOptions = [];
+  let allOptions = [];
   options.map(option => {
-    var format = {
+    let format = {
       label: option,
       value: option
     };
