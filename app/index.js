@@ -394,11 +394,11 @@ async function getCurrentUserLang(uid) {
 
 function validateEvent(uid, mid) {
   if (reminders[uid] === undefined) return false;
-  reminders[uid].forEach(messageIds => {
-    if (messageIds.self_msg.low === mid.low &&
-        messageIds.self_msg.high === mid.high &&
-        messageIds.self_msg.unsigned === mid.unsigned)
+  for (let i=0; i < reminders[uid].length; i++){
+    if (reminders[uid][i].self_msg.low === mid.low &&
+        reminders[uid][i].self_msg.high === mid.high &&
+        reminders[uid][i].self_msg.unsigned === mid.unsigned)
       return true;
-  });
+  }
   return false;
 }
