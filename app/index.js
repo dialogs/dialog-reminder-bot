@@ -1,6 +1,5 @@
 const dotenv = require("dotenv");
 const Bot = require("@dlghq/dialog-bot-sdk");
-// const Rpc = require("@dlghq/dialog-bot-sdk");
 const {
   MessageAttachment,
   ActionGroup,
@@ -9,19 +8,23 @@ const {
   Select,
   SelectOption,
   Peer,
-  PeerType
+  PeerType,
+  UUID
 } = require("@dlghq/dialog-bot-sdk");
 const { flatMap } = require("rxjs/operators");
 const { merge } = require("rxjs");
 const moment = require("moment");
-let _ = require("lodash");
-let timeOptions = require("./timeOptions");
+const _ = require("lodash");
+const timeOptions = require("./timeOptions");
+const sqlite3 = require('sqlite3');
+const Long = require('long');
 
 let reminders = {};
 
 const MINUTE = 60000;
 const OLD_MESSAGE = 60 * MINUTE;
 const OLD_DROP_TIMER = 24 * 60 * MINUTE;
+const TIME_TO_SEARCH = 1 * MINUTE;
 
 const LOCALE = {
   start: {
@@ -37,7 +40,7 @@ const LOCALE = {
     ru: "Когда мне нужно напомнить об этом?"
   },
   remind: {
-    en: "Hey! you asked to remind:",
+    en: "Hey! You asked to remind:",
     ru: "Вы просили напомнить:"
   },
   choose: {
@@ -48,9 +51,9 @@ const LOCALE = {
     en: "Selected time has passed, try again",
     ru: "Назначенное время прошло, попробуйте ещё раз"
   },
-  rotten: {
-    en: "The message is rotten",
-    ru: "Сообщение протухло"
+  noActual: {
+    en: "The message is no longer actual",
+    ru: "Сообщение больше не актуально"
   },
   half: {
     en: "In 30 minutes",
@@ -143,9 +146,7 @@ const self = bot
   .catch(err => console.log(err));
 
 bot.updateSubject.subscribe({
-  next(update) {
-    // console.log(JSON.stringify({ update }, null, 2));
-  }
+  next(update) {}
 });
 
 /*  -----
@@ -185,7 +186,7 @@ const actionsHandle = bot.subscribeToActions().pipe(
     let specifiedTime = null;
 
     if (!validateEvent(event.uid, event.mid))
-      return bot.editText(event.mid, now, LOCALE.rotten[lang]).catch(err => console.log(`editText failed: `, err));
+      return bot.editText(event.mid, now, LOCALE.noActual[lang]).catch(err => console.log(`editText failed: `, err));
 
     if (event.id === "Hour") specifiedTime = addSpecifiedTime(event.mid, event.uid, event.value, null);
     if (event.id === "Minutes") specifiedTime = addSpecifiedTime(event.mid, event.uid,null, event.value);
@@ -205,7 +206,8 @@ const actionsHandle = bot.subscribeToActions().pipe(
     } else if (event.id === "1 week") {
       scheduleReminder(60 * 24 * 7, peer, event.mid);
     } else if (event.id === "selectTime") {
-      sendTextMessage(peer, LOCALE.choose[lang], getSelect(lang), event.mid);
+      const sendMessage = await sendTextMessage(peer, LOCALE.choose[lang], getSelect(lang), event.mid);
+      replaceMid(event.uid, event.mid, sendMessage.id);
     }
     if (event.id !== "Hour" && event.id !== "Minutes")
       await bot.editText(event.mid,
@@ -235,11 +237,11 @@ function scheduleReminder(time, peer, mid) {
   console.log("Schedule reminder got called", time , peer, mid);
   const timeLeft = time * MINUTE; //milliseconds
   const messageIds = findMessageIdsAndDrop(mid, peer.id);
-  const reminderText = LOCALE.remind[messageIds["lang"]];
-
-  setTimeout(function() {
-    sendTextMessage(peer, reminderText, null, messageIds.user_msg);
-  }, timeLeft);
+  const msb = messageIds.user_msg.msb;
+  const lsb = messageIds.user_msg.lsb;
+  const lang = messageIds.lang;
+  console.log("in scheduleReminder", Date.now() + timeLeft);
+  insertDb(peer.id, String(msb), String(lsb), Date.now() + timeLeft, lang);
   const successResponse = LOCALE.schedule[messageIds.lang];
   sendTextMessage(peer, successResponse);
 }
@@ -250,7 +252,10 @@ function scheduleCustomReminder(hour, min, peer, mid) {
   const scheduledTime = moment(time, "HH:mm").format("HH:mm");
   const now = moment(Date.now()).format("HH:mm");
   const timeLeft = moment(scheduledTime, "HH:mm").diff(moment(now, "HH:mm"));
-
+  console.log("time", time);
+  console.log("scheduledTime", scheduledTime);
+  console.log("now", now);
+  console.log("timeLeft", timeLeft);
   if (timeLeft < 0) {
     const messageIds = findMessageIdsAndDrop(mid, peer.id);
     sendTextMessage(peer, LOCALE.tryAgain[messageIds.lang]);
@@ -322,7 +327,7 @@ function messageFormat(text, peer) {
   return message;
 }
 
-function  sendTextToBot(message, actionGroup, reply) {
+function sendTextToBot(message, actionGroup, reply) {
   let actionGroups = actionGroup || null;
   return bot
     .sendText(
@@ -335,9 +340,7 @@ function  sendTextToBot(message, actionGroup, reply) {
 
 function findMessageIdsAndDrop(mid, uid) {
   for (let i=0; i < reminders[uid].length; i++) {
-    if (reminders[uid][i].self_msg.low === mid.low &&
-        reminders[uid][i].self_msg.high === mid.high &&
-        reminders[uid][i].self_msg.unsigned === mid.unsigned) {
+    if (equalMid(reminders[uid][i].self_msg, mid)) {
       const result = reminders[uid][i];
       reminders[uid][i] = reminders[uid][0];
       reminders[uid] = reminders[uid].splice(1);
@@ -346,11 +349,18 @@ function findMessageIdsAndDrop(mid, uid) {
   }
 }
 
+function replaceMid(uid, mid, new_mid) {
+  for (let i=0; i < reminders[uid].length; i++) {
+    if (equalMid(reminders[uid][i].self_msg, mid)) {
+      reminders[uid][i].self_msg = new_mid;
+      return null;
+    }
+  }
+}
+
 function addSpecifiedTime(mid, uid, hour, minutes) {
   for (let i=0; i < reminders[uid].length; i++) {
-    if (reminders[uid][i].self_msg.low === mid.low &&
-        reminders[uid][i].self_msg.high === mid.high &&
-        reminders[uid][i].self_msg.unsigned === mid.unsigned) {
+    if (equalMid(reminders[uid][i].self_msg, mid)) {
       if (hour === null)
         reminders[uid][i].minutes = minutes;
       else
@@ -369,7 +379,7 @@ setInterval(async function() {
     let cut = 0;
     for (let i=0; i < reminders[key].length; i++) {
       if (moment(now).diff(reminders[key][i].timestamp) > OLD_MESSAGE) {
-        bot.editText(reminders[key][i].self_msg, new Date(), LOCALE.rotten[reminders[key][i].lang])
+        bot.editText(reminders[key][i].self_msg, new Date(), LOCALE.noActual[reminders[key][i].lang])
             .catch(err => console.log(`editText failed: `, err));
         reminders[key][i] = reminders[key][cut];
         cut++;
@@ -378,6 +388,10 @@ setInterval(async function() {
     reminders[key] = reminders[key].splice(cut);
   }
 }, OLD_DROP_TIMER);
+
+setInterval(async function() {
+  findMessagesToSend(Date.now())
+}, TIME_TO_SEARCH);
 
 async function getCurrentUserLang(uid) {
     const user = await bot.loadFullUser(uid);
@@ -392,13 +406,89 @@ async function getCurrentUserLang(uid) {
     return res || DEFAULT_LANG;
 }
 
+function equalMid(mid1, mid2) {
+  return String(mid1.msb) === String(mid2.msb) &&
+      String(mid1.lsb) === String(mid2.lsb);
+}
+
 function validateEvent(uid, mid) {
   if (reminders[uid] === undefined) return false;
   for (let i=0; i < reminders[uid].length; i++){
-    if (reminders[uid][i].self_msg.low === mid.low &&
-        reminders[uid][i].self_msg.high === mid.high &&
-        reminders[uid][i].self_msg.unsigned === mid.unsigned)
+    if (equalMid(reminders[uid][i].self_msg, mid))
       return true;
   }
   return false;
+}
+// database methods block
+
+const db = new sqlite3.Database("./messages.db", (err) => {
+  if (err) {
+    console.log('Could not connect to database', err)
+  } else {
+    console.log('Connected to database')
+  }
+});
+
+createTable();
+
+function run(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function (err) {
+      if (err) {
+        console.log('Error running sql ' + sql);
+        console.log(err);
+        reject(err)
+      } else {
+        console.log('Done running sql ' + sql);
+      }
+    })
+  })
+}
+
+function all(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => {
+      if (err) {
+        console.log('Error running sql: ' + sql);
+        console.log(err);
+        reject(err)
+      } else {
+        resolve(rows)
+      }
+    })
+  });
+}
+
+function createTable() {
+  const sql = `CREATE TABLE IF NOT EXISTS Messages (
+    uid INTEGER,
+    msb TEXT,
+    lsb TEXT,
+    timestamp INTEGER,
+    lang TEXT)`;
+  run(sql);
+}
+
+function insertDb(uid, msb, lsb, timestamp, lang) {
+  const sql = "INSERT INTO Messages (uid, msb, lsb, timestamp, lang) values(?, ?, ?, ?, ?)";
+  run(sql, [uid, msb, lsb, timestamp, lang]);
+}
+
+function findMessagesToSend(timestamp) {
+  const sql = "SELECT * FROM Messages where timestamp < ?";
+  all(sql, [timestamp]).then(result => sendMessages(result)).catch(err => console.log("err", err));
+}
+
+function sendMessages(result) {
+  result.forEach(res => {
+    const peer = new Peer(res.uid, PeerType.PRIVATE);
+    const mid = new UUID(Long.fromString(String(res.msb)), Long.fromString(String(res.lsb)));
+    sendTextMessage(peer, LOCALE.remind[res.lang], null, mid);
+    deleteSentMessages(res.msb, res.lsb);
+  })
+}
+
+function deleteSentMessages(msb, lsb) {
+  const sql = "DELETE FROM Messages where msb = ? and lsb = ?";
+  const result = run(sql, [msb, lsb]);
 }

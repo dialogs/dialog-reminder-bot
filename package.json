@@ -1,5 +1,5 @@
 {
-  "name": "jirabot_js",
+  "name": "reminder_bot_js",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
@@ -21,6 +21,8 @@
     "moment": "^2.24.0",
     "request": "^2.88.0",
     "requests": "^0.2.2",
-    "rxjs": "^6.4.0"
+    "rxjs": "^6.4.0",
+    "sqlite3": "latest",
+    "long": "latest"
   }
 }
